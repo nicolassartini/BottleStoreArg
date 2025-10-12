@@ -16,7 +16,69 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const body = await req.json();
+    const rawBody = await req.text();
+    const body = JSON.parse(rawBody);
+
+    const xSignature = req.headers.get("x-signature");
+    const xRequestId = req.headers.get("x-request-id");
+    const webhookSecret = Deno.env.get("MERCADOPAGO_WEBHOOK_SECRET");
+
+    if (webhookSecret && xSignature && xRequestId) {
+      const parts = xSignature.split(",");
+      let ts = "";
+      let hash = "";
+
+      for (const part of parts) {
+        const [key, value] = part.split("=");
+        if (key && value) {
+          const trimmedKey = key.trim();
+          const trimmedValue = value.trim();
+          if (trimmedKey === "ts") {
+            ts = trimmedValue;
+          } else if (trimmedKey === "v1") {
+            hash = trimmedValue;
+          }
+        }
+      }
+
+      const dataId = body.data?.id || "";
+      const manifest = `id:${dataId};request-id:${xRequestId};ts:${ts};`;
+
+      const encoder = new TextEncoder();
+      const key = await crypto.subtle.importKey(
+        "raw",
+        encoder.encode(webhookSecret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
+
+      const signature = await crypto.subtle.sign(
+        "HMAC",
+        key,
+        encoder.encode(manifest)
+      );
+
+      const hashArray = Array.from(new Uint8Array(signature));
+      const hashHex = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+
+      if (hashHex !== hash) {
+        console.error("Invalid signature");
+        return new Response(
+          JSON.stringify({ error: "Invalid signature" }),
+          {
+            status: 401,
+            headers: {
+              ...corsHeaders,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+      }
+
+      console.log("Signature validated successfully");
+    }
+
     console.log("Webhook received:", body);
 
     if (body.type === "payment") {
